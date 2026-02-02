@@ -7,6 +7,8 @@ Critically, the environment tracks the robot's state. In this case, the robot's 
 """
 
 from utils import Position, Pose, Bounds, Landmark, BearingRange
+import pandas as pd
+import math
 
 
 class Environment:
@@ -40,20 +42,20 @@ class Environment:
             robot_starting_pose: the initial position and heading of the robot
         """
         # TODO: set the dimensions property to the parameter value
-        self.DIMENSIONS = None
+        self.DIMENSIONS = dimensions
 
         # TODO: set the timestep size property to the parameter value
-        self.DT = None
+        self.DT = dt
 
         # TODO: set the current time to zero
-        self.time = None
+        self.time = 0
 
         # TODO: set the obstacles and landmarks properties to the parameter lists
-        self.OBSTACLES = None
-        self.LANDMARKS = None
+        self.OBSTACLES = obstacles
+        self.LANDMARKS = landmarks
 
         # TODO: set the robot pose property to the parameter value
-        self.robot_pose = None
+        self.robot_pose = robot_starting_pose
 
     def robot_step(self, dx: float, dy: float, dtheta: float):
         """
@@ -68,7 +70,13 @@ class Environment:
             Nothing, but update the robot_pose property at the end
         """
         # TODO: fill in the function
-        pass
+        new_pos = self.is_valid_motion(dx, dy)
+
+        new_theta = self.robot_pose.theta + dtheta
+
+        self.time = round(self.time + self.DT, 3)
+        self.robot_pose = Pose(new_pos, new_theta)
+
 
     def is_valid_motion(self, dx: float, dy: float):
         """
@@ -83,8 +91,15 @@ class Environment:
             dy: change in y position that should be executed
         """
         # TODO: fill in the function
-        pass
+        x_new = self.robot_pose.pos.x
+        y_new = self.robot_pose.pos.y
+        if self.is_valid_position(Position(x_new + dx, y_new + dy)):
+            x_new = self.robot_pose.pos.x + dx
+            y_new = self.robot_pose.pos.y + dy
 
+        return Position(x_new, y_new)
+
+    
     def is_valid_position(self, position: Position):
         """
         Check if a given robot position is valid; i.e. not out-of-bounds or within an obstacle. Return a boolean representing whether or not this condition is true.
@@ -96,32 +111,59 @@ class Environment:
             true if the position is valid and false otherwise
         """
         # TODO: fill in the function
-        pass
+        if self.DIMENSIONS.within_bounds(position):
+            dimension_result = True
+            for obstacle in self.OBSTACLES:
+                result = dimension_result and not obstacle.within_bounds(position)
+            return result
+        return False
 
-    def get_robot_pose(self):
+    def get_robot_pose(self) -> Pose:
         """
         Return the true robot pose.
         """
         # TODO: fill in the function
-        pass
+        return self.robot_pose
 
-    def get_proximity_to_landmarks(self):
+
+    def get_proximity_to_landmarks(self) -> pd.DataFrame:
         """
         Return a list of the robot's true range and bearing to all landmarks.
         """
         # TODO: fill in the function
-        pass
+        measurements = pd.DataFrame()
+        for i in self.LANDMARKS:
+            delta_x = i.pos.x - self.robot_pose.pos.x
+            delta_y = i.pos.y - self.robot_pose.pos.y
+            range = math.sqrt(delta_x**2 + delta_y**2)
+            bearing = math.atan2(delta_y, delta_x) - self.robot_pose.theta
+            bearing = (bearing + math.pi) % (2 * math.pi) - math.pi
+            measurements[f"Landmark{i.id}"] = [BearingRange(i.id, bearing, range)]
+        return measurements
+
 
     def take_state_snapshot(self):
         """
         Return true state information about this timestep, including time, robot position, and the robot's bearing/range to landmarks, in a table format.
         """
         # TODO: fill in the function
-        pass
+        df0 = pd.DataFrame({
+            "time": [self.time],
+            "robot_pose": [self.robot_pose.to_dict()],
+        })
+
+        prox_to_landmarks = self.get_proximity_to_landmarks()
+
+        return pd.concat([df0, prox_to_landmarks], axis=1)
 
     def get_environment_info(self):
         """
         Return static information about the environment, including dimensions, timestep size, locations and dimensions of obstacles, and locations of landmarks.
         """
         # TODO: fill in the function
-        pass
+        return {
+            "dimensions": self.DIMENSIONS,
+            "timestep": self.DT,
+            "obstacles": [obstacle.to_dict() for obstacle in self.OBSTACLES],
+            "landmarks": [landmark.to_dict() for landmark in self.LANDMARKS],
+        }

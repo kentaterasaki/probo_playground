@@ -10,6 +10,9 @@ Proprioceptive sensors measure the robot's relationship to its past states. This
 
 from abc import ABC, abstractmethod
 from math import pi
+import random
+import pandas as pd
+from utils import BearingRange
 
 
 class SensorInterface(ABC):
@@ -107,15 +110,18 @@ class WheelEncoder(SensorInterface):
         """
         super().__init__(name, robot, interval)
         # TODO: save all noise constants as properties
-        self.LIN_NOISE = None  # m/s
-        self.ANG_NOISE = None  # rad/s
+        self.LIN_NOISE = lin_noise  # m/s
+        self.ANG_NOISE = ang_noise  # rad/s
 
     def sample(self):
         """
         Sample the robot's linear and angular velocity.
         """
         # TODO: fill in the function
-        pass
+        lin_vel = self.robot.current_lin_vel * (1 + random.gauss(0, self.LIN_NOISE))
+        ang_vel = self.robot.current_ang_vel * (1 + random.gauss(0, self.ANG_NOISE))
+
+        return pd.DataFrame({"time": [self.robot.env.time], "encoder_lin_vel": [lin_vel], "encoder_ang_vel": [ang_vel]})
 
 
 class LandmarkPinger(SensorInterface):
@@ -137,7 +143,7 @@ class LandmarkPinger(SensorInterface):
         robot,
         name="landmark_pinger",
         interval=1.0,
-        range_noise=0.5,
+        range_noise=0.05,
         range_prop_noise=0.05,
         bearing_noise=pi / 6,
         max_range=10.0,
@@ -152,14 +158,26 @@ class LandmarkPinger(SensorInterface):
         """
         super().__init__(name, robot, interval)
         # TODO: save max range and all noise constants as properties
-        self.MAX_RANGE = None  # meters
-        self.RANGE_NOISE = None  # meters
-        self.RANGE_PROP_NOISE = None
-        self.BEARING_NOISE = None  # radians
+        self.MAX_RANGE = max_range  # meters
+        self.RANGE_NOISE = range_noise  # meters
+        self.RANGE_PROP_NOISE = range_prop_noise
+        self.BEARING_NOISE = bearing_noise  # radians
 
     def sample(self):
         """
         Reports noisy measurements of the bearing and range between the robot and all nearby landmarks.
         """
-        # TODO: fill in the function
-        pass
+
+        landmarks_data_noisy = pd.DataFrame()
+        gt_prox_to_landmarks = self.robot.env.get_proximity_to_landmarks()
+        for landmark in gt_prox_to_landmarks.columns:
+            gt : BearingRange = gt_prox_to_landmarks[landmark].values[0]
+            if gt.range <= self.MAX_RANGE:
+                noisy_bearing = gt.bearing + random.gauss(0, self.BEARING_NOISE)
+                noisy_range = gt.range + random.gauss(0, self.RANGE_NOISE + self.RANGE_PROP_NOISE * gt.range)
+                br_noisy = BearingRange(gt.landmark_id, noisy_bearing, noisy_range)
+            else:
+                # Out of range
+                br_noisy = BearingRange(gt.landmark_id, float('inf'), float('inf'))
+            landmarks_data_noisy[f"{self.name}_{landmark}"] = [br_noisy]
+        return landmarks_data_noisy

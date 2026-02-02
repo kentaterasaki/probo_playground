@@ -1,5 +1,5 @@
 # Probabilistic Robotics Playground: 2D Mobile Robot Simulation Environment
-> **Developed by [your name here!]**
+> **Developed by Kenta Terasaki**
 > 
 > **Contributors:** [anyone you worked with!]
 

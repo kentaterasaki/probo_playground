@@ -7,6 +7,8 @@ There is nothing you need to edit or fill in within this file, but feel free to 
 from dataclasses import dataclass
 import random
 
+NEAR_ZERO = 1e-6
+
 
 @dataclass(unsafe_hash=True)
 class Position:
