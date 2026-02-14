@@ -6,9 +6,17 @@ There is nothing you need to edit or fill in within this file, but feel free to 
 
 from dataclasses import dataclass
 import random
-
+import numpy as np
 NEAR_ZERO = 1e-6
 
+def wrap_angle(angle: float):
+    """
+    Wrap a given angle to the range [-pi, pi]
+    """
+    angle = angle % (2 * np.pi)  # force in range [0, 2 pi)
+    if angle > np.pi:  # move to [-pi, pi)
+        angle -= 2 * np.pi
+    return angle
 
 @dataclass(unsafe_hash=True)
 class Position:

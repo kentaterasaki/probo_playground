@@ -12,6 +12,7 @@ from abc import ABC, abstractmethod
 from math import pi
 import random
 import pandas as pd
+import numpy as np
 from utils import BearingRange
 
 
@@ -80,6 +81,8 @@ class WheelEncoder(SensorInterface):
     """
     This class represents a wheel encoder set that measures the robot's motor speeds.
     Reports noisy estimates of linear and angular velocities.
+    - Differential drive: linear and angular velocities
+    - Translational drive: x, y, and angular velocities
 
     Attributes:
         name: string identifier
@@ -118,10 +121,26 @@ class WheelEncoder(SensorInterface):
         Sample the robot's linear and angular velocity.
         """
         # TODO: fill in the function
-        lin_vel = self.robot.current_lin_vel * (1 + random.gauss(0, self.LIN_NOISE))
         ang_vel = self.robot.current_ang_vel * (1 + random.gauss(0, self.ANG_NOISE))
 
-        return pd.DataFrame({"time": [self.robot.env.time], "encoder_lin_vel": [lin_vel], "encoder_ang_vel": [ang_vel]})
+        # Translational (swerve) mode: report x_vel and y_vel
+        if self.robot.drive_mode == "translational":
+            x_vel = self.robot.current_x_vel * (1 + random.gauss(0, self.LIN_NOISE))
+            y_vel = self.robot.current_y_vel * (1 + random.gauss(0, self.LIN_NOISE))
+            return pd.DataFrame({
+                "time": [self.robot.env.time],
+                "encoder_x_vel": [x_vel],
+                "encoder_y_vel": [y_vel],
+                "encoder_ang_vel": [ang_vel],
+            })
+        # Differential drive mode: report lin_vel
+        else:
+            lin_vel = self.robot.current_lin_vel * (1 + random.gauss(0, self.LIN_NOISE))
+            return pd.DataFrame({
+                "time": [self.robot.env.time],
+                "encoder_lin_vel": [lin_vel],
+                "encoder_ang_vel": [ang_vel],
+            })
 
 
 class LandmarkPinger(SensorInterface):
@@ -181,3 +200,66 @@ class LandmarkPinger(SensorInterface):
                 br_noisy = BearingRange(gt.landmark_id, float('inf'), float('inf'))
             landmarks_data_noisy[f"{self.name}_{landmark}"] = [br_noisy]
         return landmarks_data_noisy
+
+class GPS(SensorInterface):
+    """
+    This class represents a GPS sensor that measures the position of the robot in 2D space.
+
+    Attributes:
+        name (str): string identifier
+        robot (Robot): reference robot
+        interval (float): period between measurements
+        last_meas_t (float): time of last measurement
+        X_NOISE (float): absolute noise for x stdev
+        Y_NOISE (float): absolute noise for y stdev
+    """
+
+    def __init__(
+        self,
+        robot,
+        name,
+        interval,
+        x_noise,
+        y_noise,
+    ):
+        """
+        Initialize an instance of the GPS class.
+
+        Args:
+            name (str): reference identifier
+            robot (Robot): reference robot
+            interval (float): period between measurements
+            x_noise (float): absolute noise for x stdev
+            y_noise (float): absolute noise for y stdev
+        """
+        super().__init__(name, robot, interval)
+        self.X_NOISE = x_noise
+        self.Y_NOISE = y_noise
+
+        # TODO: fill in the measurement model
+        # m (num of measurements) x (num of states)
+        self.H = np.array([
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ])
+        
+        # TODO: fill in the noise model
+        self.R = np.array([
+            [self.X_NOISE**2, 0.0],
+            [0.0, self.Y_NOISE**2],
+        ])
+
+    def sample(self):
+        """
+        Take a noisy GPS measurement of robot position.
+        """
+        pose = self.robot.env.robot_pose
+        noisy_x = pose.pos.x + random.gauss(0, self.X_NOISE)
+        noisy_y = pose.pos.y + random.gauss(0, self.Y_NOISE)
+        return pd.DataFrame({
+            "time": [self.robot.env.time],
+            "gps_x": [noisy_x],
+            "gps_y": [noisy_y],
+            "H": [self.H],
+            "R": [self.R],
+        })

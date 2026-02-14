@@ -35,6 +35,9 @@ class Robot:
 
         self.current_lin_vel = 0.0 # m/s
         self.current_ang_vel = 0.0 # rad/s
+        self.current_x_vel = 0.0 # m/s (translational mode)
+        self.current_y_vel = 0.0 # m/s (translational mode)
+        self.drive_mode = "differential" # "differential" or "translational"
         
         self.noise_x = 0.05
         self.noise_y = 0.05
@@ -100,10 +103,20 @@ class Robot:
             d-theta: change in heading
         """
         # TODO: fill in the function
-        dx = x_vel * self.env.DT * (1 + random.gauss(0, self.noise_x))
-        dy = y_vel * self.env.DT * (1 + random.gauss(0, self.noise_y))
-        dtheta = ang_vel * self.env.DT * (1 + random.gauss(0, self.noise_theta))
-        
+        # noisify the execution proportionally
+        x_vel = x_vel * (1 + random.gauss(0, self.noise_x))
+        y_vel = y_vel * (1 + random.gauss(0, self.noise_y))
+        ang_vel = ang_vel * (1 + random.gauss(0, self.noise_theta))
+
+        # current recording (translational mode)
+        self.drive_mode = "translational"
+        self.current_x_vel = x_vel
+        self.current_y_vel = y_vel
+        self.current_ang_vel = ang_vel
+
+        dx = x_vel * self.env.DT
+        dy = y_vel * self.env.DT
+        dtheta = ang_vel * self.env.DT
 
         return dx, dy, dtheta
 

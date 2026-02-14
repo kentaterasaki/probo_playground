@@ -94,10 +94,15 @@ class Visualizer:
         
         gt_csv_path = output_path / "ground_truth_history.csv"
         sensor_csv_path = output_path / "sensor_data_history.csv"
+        kf_csv_path = output_path / "kalman_filter_history.csv"
         env_config_path = output_path / "environment_config.csv"
         
         self.gt_log = pd.read_csv(gt_csv_path)
         self.sensor_log = pd.read_csv(sensor_csv_path)
+        
+        self.kf_log = None
+        if kf_csv_path.exists():
+            self.kf_log = pd.read_csv(kf_csv_path)
         
         self._parse_csv_data()
         self._load_env_config_from_csv(env_config_path)
@@ -258,22 +263,35 @@ class Visualizer:
         dt = self.env_info["Timestep"]
         NEAR_ZERO = 1e-6
 
+        # Detect drive mode from available columns in the sensor data
+        is_translational = 'encoder_x_vel' in self.sensor_log.columns
+
         for idx, row in self.sensor_log.iterrows():
-            v = row['encoder_lin_vel']
             w = row['encoder_ang_vel']
             time = row['time']
 
-            if abs(w) < NEAR_ZERO:
-                # Straight line motion
-                dx = v * dt * np.cos(theta)
-                dy = v * dt * np.sin(theta)
-                dtheta = 0.0
-            else:
-                # Arc motion (proper differential drive)
-                r = v / w  # turning radius
+            if is_translational:
+                # Translational (swerve) drive: x and y velocities are independent
+                vx = row['encoder_x_vel']
+                vy = row['encoder_y_vel']
+                dx = vx * dt
+                dy = vy * dt
                 dtheta = w * dt
-                dx = r * (np.sin(theta + dtheta) - np.sin(theta))
-                dy = -r * (np.cos(theta + dtheta) - np.cos(theta))
+            else:
+                # Differential drive: linear + angular velocities
+                v = row['encoder_lin_vel']
+
+                if abs(w) < NEAR_ZERO:
+                    # Straight line motion
+                    dx = v * dt * np.cos(theta)
+                    dy = v * dt * np.sin(theta)
+                    dtheta = 0.0
+                else:
+                    # Arc motion (proper differential drive)
+                    r = v / w  # turning radius
+                    dtheta = w * dt
+                    dx = r * (np.sin(theta + dtheta) - np.sin(theta))
+                    dy = -r * (np.cos(theta + dtheta) - np.cos(theta))
             
             # Update pose
             x += dx
@@ -335,6 +353,69 @@ class Visualizer:
                     })
 
         return pd.DataFrame(poses)
+
+    def poses_from_kf(self):
+        """
+        Extract Kalman Filter estimated poses from the KF log.
+        Output a DataFrame with columns: Time | x | y | theta
+        Also stores covariance data for uncertainty ellipses.
+        Claude Opus 4.6 helped me write this function.
+        """
+        if self.kf_log is None or self.kf_log.empty:
+            return pd.DataFrame()
+        
+        poses = pd.DataFrame({
+            "Time": self.kf_log["time"],
+            "x": self.kf_log["x"],
+            "y": self.kf_log["y"],
+            "theta": self.kf_log["theta"],
+        })
+        return poses
+
+    def plot_uncertainty_ellipses(self, ax, color="blue", alpha=0.15, skip=None):
+        """
+        Plot covariance ellipses from the Kalman Filter at regular intervals.
+        Each ellipse represents the 95% confidence region (2-sigma) of the KF estimate.
+        Claude Opus 4.6 helped me write this function.
+        """
+        if self.kf_log is None or self.kf_log.empty:
+            return
+        
+        from matplotlib.patches import Ellipse
+        
+        if skip is None:
+            skip = max(1, len(self.kf_log) // 15)
+        
+        for idx in range(0, len(self.kf_log), skip):
+            row = self.kf_log.iloc[idx]
+            
+            # Extract 2x2 position covariance submatrix
+            P_xx = row["P_xx"]
+            P_yy = row["P_yy"]
+            P_xy = row["P_xy"]
+            cov = np.array([[P_xx, P_xy], [P_xy, P_yy]])
+            
+            # Eigen decomposition to get ellipse axes and rotation
+            eigenvalues, eigenvectors = np.linalg.eigh(cov)
+            # Clamp negative eigenvalues (numerical issues) to small positive
+            eigenvalues = np.maximum(eigenvalues, 1e-10)
+            
+            # 95% confidence: chi-squared with 2 DOF -> scale factor ~2.4477
+            scale = 2.0 * np.sqrt(eigenvalues) * 2.4477
+            
+            angle = np.degrees(np.arctan2(eigenvectors[1, 0], eigenvectors[0, 0]))
+            
+            ellipse = Ellipse(
+                xy=(row["x"], row["y"]),
+                width=scale[0],
+                height=scale[1],
+                angle=angle,
+                facecolor=color,
+                edgecolor=color,
+                alpha=alpha,
+                linewidth=1,
+            )
+            ax.add_patch(ellipse)
 
     def plot_single_trajectory(
         self,
@@ -417,7 +498,7 @@ class Visualizer:
             alpha=alpha,
         )
 
-        ax.legend(loc="upper right")
+        ax.legend(loc="lower left")
         return ax
 
     def draw_all(self, animate=False, fps=30, speedup=3.0, linger_seconds=2.0):
@@ -447,6 +528,16 @@ class Visualizer:
                 scatter=True,
             )
         
+        kf_poses = self.poses_from_kf()
+        if not kf_poses.empty:
+            self.plot_single_trajectory(
+                "Linear Kalman Filter",
+                kf_poses,
+                "blue",
+            )
+            # Draw uncertainty ellipses on the current axes
+            self.plot_uncertainty_ellipses(plt.gca(), color="blue", alpha=0.1)
+        
         plt.savefig(self.output_path / "dataset_viz.png")
         print(f"Static plot saved: {self.output_path / 'dataset_viz.png'}")
         
@@ -473,6 +564,7 @@ class Visualizer:
         gt_poses = self.poses_from_gt()
         odom_poses = self.poses_from_odom()
         gps_poses = self.poses_from_gps()
+        kf_poses = self.poses_from_kf()
 
         # Find the maximum number of frames needed
         max_frames = max(len(gt_poses), len(odom_poses))
@@ -506,11 +598,18 @@ class Visualizer:
             alpha=0.6,
             zorder=5,
         )
+        (kf_line,) = ax.plot(
+            [], [], "-", color="blue", linewidth=2, label="Linear Kalman Filter", alpha=0.8
+        )
 
         # Initialize end marker objects (hidden initially)
         gt_end = ax.plot([], [], "s", color="green", markersize=10, alpha=0)[0]
         odom_end = ax.plot([], [], "s", color="red", markersize=10, alpha=0)[0]
         gps_end = ax.plot([], [], "s", color="orange", markersize=10, alpha=0)[0]
+        kf_end = ax.plot([], [], "s", color="blue", markersize=10, alpha=0)[0]
+
+        # List to track uncertainty ellipse patches for animation
+        kf_ellipses = []
 
         # Add time display
         time_text = ax.text(
@@ -531,17 +630,21 @@ class Visualizer:
             odom_line.set_data([], [])
             gps_line.set_data([], [])
             gps_scatter.set_offsets(np.empty((0, 2)))
+            kf_line.set_data([], [])
             gt_end.set_data([], [])
             odom_end.set_data([], [])
             gps_end.set_data([], [])
+            kf_end.set_data([], [])
             time_text.set_text("")
             return (
                 gt_line,
                 odom_line,
                 gps_line,
                 gps_scatter,
+                kf_line,
                 gt_end,
                 odom_end,
+                kf_end,
                 time_text,
             )
 
@@ -587,7 +690,39 @@ class Visualizer:
                     gps_line.set_data(gps_up_to_now["x"], gps_up_to_now["y"])
                     gps_scatter.set_offsets(gps_up_to_now[["x", "y"]].values)
 
-            return gt_line, odom_line, gps_scatter, gt_end, odom_end, time_text
+            # Update Kalman Filter trajectory. Claude Opus 4.6 helped me write this if statement.
+            if not kf_poses.empty and actual_frame < len(kf_poses):
+                kf_data = kf_poses.iloc[: actual_frame + 1]
+                kf_line.set_data(kf_data["x"], kf_data["y"])
+
+                # Draw uncertainty ellipse at current position (remove previous)
+                from matplotlib.patches import Ellipse
+                for e in kf_ellipses:
+                    e.remove()
+                kf_ellipses.clear()
+
+                if self.kf_log is not None and actual_frame < len(self.kf_log):
+                    row = self.kf_log.iloc[actual_frame]
+                    P_xx, P_yy, P_xy = row["P_xx"], row["P_yy"], row["P_xy"]
+                    cov = np.array([[P_xx, P_xy], [P_xy, P_yy]])
+                    eigenvalues, eigenvectors = np.linalg.eigh(cov)
+                    eigenvalues = np.maximum(eigenvalues, 1e-10)
+                    scale = 2.0 * np.sqrt(eigenvalues) * 2.4477
+                    angle = np.degrees(np.arctan2(eigenvectors[1, 0], eigenvectors[0, 0]))
+                    ellipse = Ellipse(
+                        xy=(row["x"], row["y"]),
+                        width=scale[0], height=scale[1], angle=angle,
+                        facecolor="blue", edgecolor="blue", alpha=0.15, linewidth=1,
+                    )
+                    ax.add_patch(ellipse)
+                    kf_ellipses.append(ellipse)
+
+                # Show end marker on final frames
+                if is_final_frame:
+                    kf_end.set_data([kf_data.iloc[-1]["x"]], [kf_data.iloc[-1]["y"]])
+                    kf_end.set_alpha(0.8)
+
+            return gt_line, odom_line, gps_scatter, kf_line, gt_end, odom_end, kf_end, time_text
 
         # Create animation
         anim = FuncAnimation(
@@ -596,7 +731,7 @@ class Visualizer:
             init_func=init,
             frames=len(frame_indices),
             interval=1000 / fps,  # milliseconds between frames
-            blit=True,
+            blit=False,
             repeat=True,
         )
 

@@ -1,6 +1,19 @@
 [project]
-name = "probo_playground"
+name = "probo-playground"
 version = "0.1.0"
+description = "Probabilistic Robotics Playground: 2D Mobile Robot Simulation"
+requires-python = ">=3.10"
+dependencies = [
+    "matplotlib",
+    "numpy",
+    "pandas",
+    "pyyaml",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
