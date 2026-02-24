@@ -11,6 +11,9 @@ Proprioceptive sensors measure the robot's relationship to its past states. This
 from abc import ABC, abstractmethod
 from math import pi
 import random
+from sympy.abc import x, y, theta, j, k
+from sympy import Matrix, Symbol, sqrt, atan2
+import math
 import pandas as pd
 import numpy as np
 from utils import BearingRange
@@ -143,6 +146,64 @@ class WheelEncoder(SensorInterface):
             })
 
 
+# class LandmarkPinger(SensorInterface):
+#     """
+#     This class represents a sensor that measures the range and bearing between the robot and the floating-point landmarks on the map. In practice, this sensor could be a ToF sensor, a node in a network of beacons, or even a camera.
+
+#     Attributes:
+#         name: reference identifier
+#         robot (Robot): reference robot
+#         interval (float): period between measurements
+#         MAX_RANGE (int): maximum distance from a beacon for it to be visible
+#         RANGE_NOISE (float): absolute noise for range stdev
+#         RANGE_NOISE_RATIO (float): porportional noise for range stdev
+#         BEARING_NOISE (float): absolute noise for bearing stdev
+#     """
+
+#     def __init__(
+#         self,
+#         robot,
+#         name="landmark_pinger",
+#         interval=1.0,
+#         range_noise=0.05,
+#         range_prop_noise=0.05,
+#         bearing_noise=pi / 6,
+#         max_range=10.0,
+#     ):
+#         """
+#         Initialize an instance of the LandmarkPinger class.
+
+#         Args:
+#             name (str): reference identifier
+#             robot (Robot): reference robot
+#             interval (float): period between measurements
+#         """
+#         super().__init__(name, robot, interval)
+#         # TODO: save max range and all noise constants as properties
+#         self.MAX_RANGE = max_range  # meters
+#         self.RANGE_NOISE = range_noise  # meters
+#         self.RANGE_PROP_NOISE = range_prop_noise
+#         self.BEARING_NOISE = bearing_noise  # radians
+
+#     def sample(self):
+#         """
+#         Reports noisy measurements of the bearing and range between the robot and all nearby landmarks.
+#         """
+
+#         landmarks_data_noisy = pd.DataFrame()
+#         gt_prox_to_landmarks = self.robot.env.get_proximity_to_landmarks()
+#         for landmark in gt_prox_to_landmarks.columns:
+#             gt : BearingRange = gt_prox_to_landmarks[landmark].values[0]
+#             if gt.range <= self.MAX_RANGE:
+#                 noisy_bearing = gt.bearing + random.gauss(0, self.BEARING_NOISE)
+#                 noisy_range = gt.range + random.gauss(0, self.RANGE_NOISE + self.RANGE_PROP_NOISE * gt.range)
+#                 br_noisy = BearingRange(gt.landmark_id, noisy_bearing, noisy_range)
+#             else:
+#                 # Out of range
+#                 br_noisy = BearingRange(gt.landmark_id, float('inf'), float('inf'))
+#             landmarks_data_noisy[f"{self.name}_{landmark}"] = [br_noisy]
+#         return landmarks_data_noisy
+
 class LandmarkPinger(SensorInterface):
     """
     This class represents a sensor that measures the range and bearing between the robot and the floating-point landmarks on the map. In practice, this sensor could be a ToF sensor, a node in a network of beacons, or even a camera.
@@ -162,10 +223,10 @@ class LandmarkPinger(SensorInterface):
         robot,
         name="landmark_pinger",
         interval=1.0,
-        range_noise=0.05,
+        range_noise=0.5,
         range_prop_noise=0.05,
         bearing_noise=pi / 6,
-        max_range=10.0,
+        max_range=5.0,
     ):
         """
         Initialize an instance of the LandmarkPinger class.
@@ -182,11 +243,29 @@ class LandmarkPinger(SensorInterface):
         self.RANGE_PROP_NOISE = range_prop_noise
         self.BEARING_NOISE = bearing_noise  # radians
 
+        # TODO: define the nonlinear measurement model symbolically
+        self.h_x: Matrix = Matrix(
+            [
+                [sqrt((j-x)**2 + (k-y)**2)],  # calculation of r (range)
+                [atan2(k-y, j-x) - theta],  # calculation of phi (bearing)
+            ]
+        )
+
+        # TODO: define the Jacobian of h(x) symbolically
+        self.H: Matrix = self.h_x.jacobian([x, y, theta])
+
+        self.subs: dict[Symbol, float] = {
+            x: 0.0,
+            y: 0.0,
+            theta: 0.0,
+            k: 0.0,
+            j: 0.0,
+        }
+
     def sample(self):
         """
         Reports noisy measurements of the bearing and range between the robot and all nearby landmarks.
         """
-
         landmarks_data_noisy = pd.DataFrame()
         gt_prox_to_landmarks = self.robot.env.get_proximity_to_landmarks()
         for landmark in gt_prox_to_landmarks.columns:
@@ -200,6 +279,93 @@ class LandmarkPinger(SensorInterface):
                 br_noisy = BearingRange(gt.landmark_id, float('inf'), float('inf'))
             landmarks_data_noisy[f"{self.name}_{landmark}"] = [br_noisy]
         return landmarks_data_noisy
+
+    def R(self, z):
+        """
+        Estimate variance of a given pinger measurement.
+
+        Args:
+            z (ndarray): pinger observation [[range 0], [0 bearing]]
+
+        Returns:
+            Sensor noise model for pinger measurement
+        """
+        bearing_stdev = self.BEARING_NOISE
+        range_stdev = self.RANGE_NOISE + z[0] * self.RANGE_PROP_NOISE
+        return np.diag([range_stdev, bearing_stdev]) ** 2
+
+    def H_eval(self, state_vec, lm_id):
+        """
+        Evaluate the Jacobian of h(x) at x, which reshapes a state vector to be in the observation space. This matrix is used to turn a state prediction into an observation prediction for a specific landmark.
+
+        Args:
+            x: the current state vector, to linearize with respect to
+            lm_id: the ID of the landmark that we are predicting an observation of
+        """
+        # TODO: find the x and y position of the given landmark
+        landmark = None
+        for lm in self.robot.env.LANDMARKS:
+            if lm.id == lm_id:
+                landmark = lm
+                break
+        
+        if landmark is None:
+            raise ValueError(f"Landmark with ID {lm_id} not found")
+        
+        lm_x = landmark.pos.x
+        lm_y = landmark.pos.y
+
+        # TODO: set the value of each symbolic substitution to the actual numerical value that was passed in
+        from sympy.abc import x, y, theta, j, k
+        self.subs[x] = state_vec[0]
+        self.subs[y] = state_vec[1]
+        self.subs[theta] = state_vec[2]
+        self.subs[j] = lm_x  # note: we use j for landmark x position
+        self.subs[k] = lm_y  # note: we use k for landmark y position
+
+        # TODO: evaluate the Jacobian at the subs values and convert it to a numpy array
+        H_eval = np.array(self.H.subs(self.subs)).astype(np.float64)
+
+        # return
+        return H_eval
+
+    def y(self, z, state_vec, lm_id):
+        """
+        Calculate the residual between an observation x and a predicted observation derived from a predicted state. The predicted observation is in reference to a specified landmark.
+        """
+        # TODO: find the x and y position of the given landmark
+        landmark = None
+        for lm in self.robot.env.LANDMARKS:
+            if lm.id == lm_id:
+                landmark = lm
+                break
+        
+        if landmark is None:
+            raise ValueError(f"Landmark with ID {lm_id} not found")
+        
+        lm_x = landmark.pos.x
+        lm_y = landmark.pos.y
+
+        # TODO: set the value of each symbolic substitution to the actual numerical value that was passed in
+        from sympy.abc import x, y, theta, j, k
+        self.subs[x] = state_vec[0]
+        self.subs[y] = state_vec[1]
+        self.subs[theta] = state_vec[2]
+        self.subs[j] = lm_x  # note: we use j for landmark x position
+        self.subs[k] = lm_y  # note: we use k for landmark y position
+
+        # TODO: evaluate the measurement model at the subs values and convert it to a numpy array
+        hx_eval = np.array(self.h_x.subs(self.subs)).astype(np.float64).flatten()
+
+        # TODO: calculate the residual
+        residual = z - hx_eval
+        
+        # Wrap the bearing component (index 1) to [-pi, pi]
+        from utils import wrap_angle
+        residual[1] = wrap_angle(residual[1])
+
+        # return
+        return residual
 
 class GPS(SensorInterface):
     """

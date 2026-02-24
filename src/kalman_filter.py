@@ -39,6 +39,7 @@ class KalmanFilter:
         self.B: np.ndarray = np.identity(3)*dt
 
         # TODO: define the process noise
+        self.Q_stdev = 0.1
         self.Q: np.ndarray = self.get_Q()
 
 
@@ -56,6 +57,7 @@ class KalmanFilter:
         self.x = self.F @ self.x + self.B @ u
 
         # TODO: update the process model by propagating it through the state transition matrix and adding noise
+        self.Q = self.get_Q()
         self.P = self.F @ self.P @ self.F.T + self.Q
 
         return self.x, self.P
@@ -98,24 +100,5 @@ class KalmanFilter:
         """
         Generate white noise to apply to the process model after each prediction.
         """
-        # TODO: explore different standard deviation values for this function!
-        stdev = 0.006
-        return np.array(
-            [
-                [
-                    random.gauss(0, stdev),
-                    random.gauss(0, stdev),
-                    random.gauss(0, stdev),
-                ],
-                [
-                    random.gauss(0, stdev),
-                    random.gauss(0, stdev),
-                    random.gauss(0, stdev),
-                ],
-                [
-                    random.gauss(0, stdev),
-                    random.gauss(0, stdev),
-                    random.gauss(0, stdev),
-                ],
-            ]
-        )
+        stdev = self.Q_stdev
+        return np.identity(3) * stdev**2
