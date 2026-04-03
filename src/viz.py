@@ -1,11 +1,84 @@
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import pandas as pd
 import numpy as np
 from matplotlib.animation import FuncAnimation, PillowWriter
-import pickle
 from pathlib import Path
-from utils import Pose, Landmark
+import ast
+
+
+def save_environment_config(output_path, dimensions, obstacles, landmarks, timestep, pinger_range):
+    """
+    Save environment configuration to CSV for visualization. Had Claude Code help generate this function as I was struggling with getting all the objects on the visualizations.
+    
+    Args:
+        output_path: Path to output directory
+        dimensions: Bounds object with x_min, x_max, y_min, y_max
+        obstacles: List of Bounds objects
+        landmarks: List of Landmark objects with pos.x, pos.y, and id
+        timestep: Simulation timestep (dt)
+        pinger_range: Maximum range for landmark pinger sensor
+    """
+    output_path = Path(output_path)
+    config_file = output_path / "environment_config.csv"
+    
+    config_data = []
+    
+    # Save dimensions
+    config_data.append({
+        'type': 'dimension',
+        'x_min': dimensions.x_min,
+        'x_max': dimensions.x_max,
+        'y_min': dimensions.y_min,
+        'y_max': dimensions.y_max,
+        'id': 0
+    })
+    
+    # Save obstacles
+    for i, obs in enumerate(obstacles):
+        config_data.append({
+            'type': 'obstacle',
+            'x_min': obs.x_min,
+            'x_max': obs.x_max,
+            'y_min': obs.y_min,
+            'y_max': obs.y_max,
+            'id': i
+        })
+    
+    # Save landmarks
+    for lm in landmarks:
+        config_data.append({
+            'type': 'landmark',
+            'x_min': lm.pos.x,
+            'x_max': lm.pos.y,
+            'y_min': 0,
+            'y_max': 0,
+            'id': lm.id
+        })
+    
+    # Save timestep
+    config_data.append({
+        'type': 'timestep',
+        'x_min': timestep,
+        'x_max': 0,
+        'y_min': 0,
+        'y_max': 0,
+        'id': 0
+    })
+    
+    # Save pinger range
+    config_data.append({
+        'type': 'pinger_range',
+        'x_min': pinger_range,
+        'x_max': 0,
+        'y_min': 0,
+        'y_max': 0,
+        'id': 0
+    })
+    
+    pd.DataFrame(config_data).to_csv(config_file, index=False)
 
 
 class Visualizer:
@@ -13,27 +86,94 @@ class Visualizer:
     Visualizer for Kalman Filter trajectory estimation results.
     """
 
-    def __init__(
-        self,
-        output_path: Path,
-    ):
+    def __init__(self, output_path: Path, filter_type: str = "kalman", show_landmarks: bool = True, 
+                 params: dict = None):
         """
         Initialize the visualizer class.
         """
         self.output_path = output_path
-        gt_log_path = output_path / "groundtruth_log.pkl"
-        sensor_log_path = output_path / "sensor_log.pkl"
-        env_info_path = output_path / "env_info.pkl"
-        sensor_info_path = output_path / "sensor_info.pkl"
-        with open(sensor_log_path, "rb") as f:
-            self.sensor_log = pickle.load(f)
-        with open(gt_log_path, "rb") as f:
-            self.gt_log = pickle.load(f)
-        # unpack into dataframes
-        with open(env_info_path, "rb") as f:
-            self.env_info = pickle.load(f)
-        with open(sensor_info_path, "rb") as f:
-            self.sensor_info = pickle.load(f)
+        self.filter_type = filter_type
+        self.show_landmarks = show_landmarks
+        self.params = params or {}
+        
+        gt_csv_path = output_path / "ground_truth_history.csv"
+        sensor_csv_path = output_path / "sensor_data_history.csv"
+        env_config_path = output_path / "environment_config.csv"
+        
+        if filter_type == "kalman":
+            kf_csv_path = output_path / "kalman_filter_history.csv"
+            self.filter_label = "Linear Kalman Filter"
+        elif filter_type == "extended_kalman":
+            kf_csv_path = output_path / "extended_kalman_filter_history.csv"
+            self.filter_label = "Extended Kalman Filter"     
+        self.gt_log = pd.read_csv(gt_csv_path)
+        self.sensor_log = pd.read_csv(sensor_csv_path)
+        
+        self.kf_log = None
+        if kf_csv_path.exists():
+            self.kf_log = pd.read_csv(kf_csv_path)
+        
+        self._parse_csv_data()
+        self._load_env_config_from_csv(env_config_path)
+ 
+    def _parse_csv_data(self):
+        """Parse string representations in CSV data."""
+        def parse_pose_string(pose_str):
+            """Parse robot pose string into a dict."""
+            try:
+                return ast.literal_eval(pose_str)
+            except:
+                return None
+        
+        self.gt_log['robot_pose_parsed'] = self.gt_log['robot_pose'].apply(parse_pose_string)
+    
+    def _load_env_config_from_csv(self, config_path: Path):
+        """Load environment configuration from CSV file."""
+        config_df = pd.read_csv(config_path)
+        
+        dim_row = config_df[config_df['type'] == 'dimension'].iloc[0]
+        dimensions = {
+            'x_min': dim_row['x_min'],
+            'x_max': dim_row['x_max'],
+            'y_min': dim_row['y_min'],
+            'y_max': dim_row['y_max']
+        }
+        
+        obstacles = []
+        obs_rows = config_df[config_df['type'] == 'obstacle']
+        for _, obs in obs_rows.iterrows():
+            obstacles.append({
+                'x_min': obs['x_min'],
+                'x_max': obs['x_max'],
+                'y_min': obs['y_min'],
+                'y_max': obs['y_max']
+            })
+        
+        landmarks = []
+        lm_rows = config_df[config_df['type'] == 'landmark']
+        for _, lm in lm_rows.iterrows():
+            landmarks.append({
+                'id': int(lm['id']),
+                'pos': {
+                    'x': lm['x_min'],
+                    'y': lm['x_max']
+                }
+            })
+        
+        ts_row = config_df[config_df['type'] == 'timestep']
+        timestep = ts_row.iloc[0]['x_min']
+        
+        pr_row = config_df[config_df['type'] == 'pinger_range']
+        pinger_range = pr_row.iloc[0]['x_min']
+        
+        self.env_info = {
+            'Dimensions': dimensions,
+            'Obstacles': obstacles,
+            'Landmarks': landmarks,
+            'Pinger Range': pinger_range,
+            'Timestep': timestep
+        }
+    
 
     def plot_env(self):
         """
@@ -83,37 +223,61 @@ class Visualizer:
             ax.add_patch(rect)
 
         # Plot landmarks
-        for lm in self.env_info["Landmarks"]:
-            # Plot pinging range circle
-            circle = patches.Circle(
-                (lm["pos"]["x"], lm["pos"]["y"]),
-                self.env_info["Pinger Range"],
-                linewidth=1,
-                edgecolor="red",
-                facecolor="red",
-                alpha=0.1,
-                label="Pinging Range" if lm == self.env_info["Landmarks"][0] else "",
-            )
-            ax.add_patch(circle)
+        if self.show_landmarks:
+            for lm in self.env_info["Landmarks"]:
+                # Plot pinging range circle
+                circle = patches.Circle(
+                    (lm["pos"]["x"], lm["pos"]["y"]),
+                    self.env_info["Pinger Range"],
+                    linewidth=1,
+                    edgecolor="red",
+                    facecolor="red",
+                    alpha=0.1,
+                    label="Pinging Range" if lm == self.env_info["Landmarks"][0] else "",
+                )
+                ax.add_patch(circle)
 
-            # plot floating point landmarks
-            ax.plot(
-                lm["pos"]["x"],
-                lm["pos"]["y"],
-                "r*",
-                markersize=15,
-                label="Landmark" if lm == self.env_info["Landmarks"][0] else "",
-            )
-            ax.annotate(
-                f"LM{lm['id']}",
-                (lm["pos"]["x"], lm["pos"]["y"]),
-                xytext=(5, 5),
-                textcoords="offset points",
-                fontsize=10,
-                color="red",
-            )
+                # plot floating point landmarks
+                ax.plot(
+                    lm["pos"]["x"],
+                    lm["pos"]["y"],
+                    "r*",
+                    markersize=15,
+                    label="Landmark" if lm == self.env_info["Landmarks"][0] else "",
+                )
+                ax.annotate(
+                    f"LM{lm['id']}",
+                    (lm["pos"]["x"], lm["pos"]["y"]),
+                    xytext=(5, 5),
+                    textcoords="offset points",
+                    fontsize=10,
+                    color="red",
+                )
 
-        ax.legend(loc="upper right")
+        # Add parameter info to legend if provided generated by Claude Opus 4.6
+        if self.params:
+            param_lines = []
+            if 'Q' in self.params:
+                Q_val = self.params['Q']
+                if isinstance(Q_val, np.ndarray):
+                    if Q_val.ndim == 2:
+                        Q_display = np.mean(np.diag(Q_val))
+                    else:
+                        Q_display = Q_val.flat[0]
+                else:
+                    Q_display = Q_val
+                param_lines.append(f"Q (process): {Q_display:.4f}")
+            if 'R' in self.params:
+                R_val = self.params['R']
+                param_lines.append(f"R (meas): [{R_val[0,0]:.2f}, {R_val[1,1]:.2f}]")
+            if 'gps_noise' in self.params:
+                param_lines.append(f"GPS σ: {self.params['gps_noise']:.2f}m")
+            if 'pinger_range_noise' in self.params:
+                param_lines.append(f"Pinger range σ: {self.params['pinger_range_noise']:.2f}m")
+            if 'pinger_bearing_noise' in self.params:
+                bearing_deg = np.degrees(self.params['pinger_bearing_noise'])
+                param_lines.append(f"Pinger bearing σ: {bearing_deg:.1f}°")
+            
         return fig, ax
 
     def poses_from_odom(self):
@@ -123,30 +287,56 @@ class Visualizer:
         Output a DataFrame of estimated pose data with the following columns:
         Time | x | y | theta
         """
-        # pop the first pose from GT
-        prior = next(self.gt_log.itertuples())
-        pose: Pose = prior.RobotPose
-        x = pose.pos.x
-        y = pose.pos.y
-        theta = pose.theta
+        first_pose = self.gt_log['robot_pose_parsed'].iloc[0]
+        x = first_pose['pos']['x']
+        y = first_pose['pos']['y']
+        theta = first_pose['theta']
+        
         poses = []
         dt = self.env_info["Timestep"]
+        NEAR_ZERO = 1e-6
 
-        for row in self.sensor_log.itertuples():
-            v = row.Odometry_LinearVelocity
-            w = row.Odometry_AngularVelocity
+        # Detect drive mode from available columns in the sensor data
+        is_translational = 'encoder_x_vel' in self.sensor_log.columns
 
-            # Dead reckoning integration
-            x += np.cos(theta) * v * dt
-            y += np.sin(theta) * v * dt
-            theta += w * dt
+        for idx, row in self.sensor_log.iterrows():
+            w = row['encoder_ang_vel']
+            time = row['time']
+
+            if is_translational:
+                # Translational (swerve) drive: x and y velocities are independent
+                vx = row['encoder_x_vel']
+                vy = row['encoder_y_vel']
+                dx = vx * dt
+                dy = vy * dt
+                dtheta = w * dt
+            else:
+                # Differential drive: linear + angular velocities
+                v = row['encoder_lin_vel']
+
+                if abs(w) < NEAR_ZERO:
+                    # Straight line motion
+                    dx = v * dt * np.cos(theta)
+                    dy = v * dt * np.sin(theta)
+                    dtheta = 0.0
+                else:
+                    # Arc motion (proper differential drive)
+                    r = v / w  # turning radius
+                    dtheta = w * dt
+                    dx = r * (np.sin(theta + dtheta) - np.sin(theta))
+                    dy = -r * (np.cos(theta + dtheta) - np.cos(theta))
+            
+            # Update pose
+            x += dx
+            y += dy
+            theta += dtheta
 
             # Wrap theta to [-pi, pi]
             theta = theta % (2 * np.pi)
             if theta > np.pi:
                 theta -= 2 * np.pi
 
-            poses.append({"Time": row.Time, "x": x, "y": y, "theta": theta})
+            poses.append({"Time": time, "x": x, "y": y, "theta": theta})
 
         return pd.DataFrame(poses)
 
@@ -161,13 +351,16 @@ class Visualizer:
         Where time data is in seconds.
         """
         poses = []
-
-        for row in self.gt_log.itertuples():
-            pose: Pose = row.RobotPose
-            x = pose.pos.x
-            y = pose.pos.y
-            theta = pose.theta
-            poses.append({"Time": row.Time, "x": x, "y": y, "theta": theta})
+        
+        for idx, row in self.gt_log.iterrows():
+            pose_dict = row['robot_pose_parsed']
+            if pose_dict:
+                poses.append({
+                    "Time": row['time'],
+                    "x": pose_dict['pos']['x'],
+                    "y": pose_dict['pos']['y'],
+                    "theta": pose_dict['theta']
+                })
 
         return pd.DataFrame(poses)
 
@@ -181,28 +374,81 @@ class Visualizer:
         Note: theta is set to NaN since GPS doesn't measure heading.
         """
         poses = []
-
-        for row in self.sensor_log.itertuples():
-            # Check if GPS data exists and is a Position object
-            if hasattr(row, "GPS") and row.GPS is not None:
-                try:
-                    # Access Position dataclass fields
-                    x = row.GPS.x
-                    y = row.GPS.y
-
-                    poses.append(
-                        {
-                            "Time": row.Time,
-                            "x": x,
-                            "y": y,
-                            "theta": np.nan,  # GPS doesn't measure heading
-                        }
-                    )
-                except (AttributeError, TypeError):
-                    # Skip if GPS is not a valid Position object
-                    continue
+        
+        if 'gps_x' in self.sensor_log.columns and 'gps_y' in self.sensor_log.columns:
+            for idx, row in self.sensor_log.iterrows():
+                if pd.notna(row['gps_x']) and pd.notna(row['gps_y']):
+                    poses.append({
+                        "Time": row['time'],
+                        "x": row['gps_x'],
+                        "y": row['gps_y'],
+                        "theta": np.nan,
+                    })
 
         return pd.DataFrame(poses)
+
+    def poses_from_kf(self):
+        """
+        Extract Kalman Filter estimated poses from the KF log.
+        Output a DataFrame with columns: Time | x | y | theta
+        Also stores covariance data for uncertainty ellipses.
+        Claude Opus 4.6 helped me write this function.
+        """
+        if self.kf_log is None or self.kf_log.empty:
+            return pd.DataFrame()
+        
+        poses = pd.DataFrame({
+            "Time": self.kf_log["time"],
+            "x": self.kf_log["x"],
+            "y": self.kf_log["y"],
+            "theta": self.kf_log["theta"],
+        })
+        return poses
+
+    def plot_uncertainty_ellipses(self, ax, color="blue", alpha=0.15, skip=None):
+        """
+        Plot covariance ellipses from the Kalman Filter at regular intervals.
+        Each ellipse represents the 95% confidence region (2-sigma) of the KF estimate.
+        Claude Opus 4.6 helped me write this function.
+        """
+        if self.kf_log is None or self.kf_log.empty:
+            return
+        
+        from matplotlib.patches import Ellipse
+        
+        if skip is None:
+            skip = max(1, len(self.kf_log) // 15)
+        
+        for idx in range(0, len(self.kf_log), skip):
+            row = self.kf_log.iloc[idx]
+            
+            # Extract 2x2 position covariance submatrix
+            P_xx = row["P_xx"]
+            P_yy = row["P_yy"]
+            P_xy = row["P_xy"]
+            cov = np.array([[P_xx, P_xy], [P_xy, P_yy]])
+            
+            # Eigen decomposition to get ellipse axes and rotation
+            eigenvalues, eigenvectors = np.linalg.eigh(cov)
+            # Clamp negative eigenvalues (numerical issues) to small positive
+            eigenvalues = np.maximum(eigenvalues, 1e-10)
+            
+            # 95% confidence: chi-squared with 2 DOF -> scale factor ~2.4477
+            scale = 2.0 * np.sqrt(eigenvalues) * 2.4477
+            
+            angle = np.degrees(np.arctan2(eigenvectors[1, 0], eigenvectors[0, 0]))
+            
+            ellipse = Ellipse(
+                xy=(row["x"], row["y"]),
+                width=scale[0],
+                height=scale[1],
+                angle=angle,
+                facecolor=color,
+                edgecolor=color,
+                alpha=alpha,
+                linewidth=1,
+            )
+            ax.add_patch(ellipse)
 
     def plot_single_trajectory(
         self,
@@ -211,6 +457,7 @@ class Visualizer:
         color="blue",
         alpha=1.0,
         scatter=False,
+        zorder=None,
     ):
         """
         Given a DataFrame of robot pose data with the following columns:
@@ -223,16 +470,18 @@ class Visualizer:
         else:
             fig, ax = self.plot_env()
 
-        # Plot trajectory path
-        ax.plot(
-            pose_table["x"],
-            pose_table["y"],
-            "-",
-            color=color,
-            linewidth=2,
-            label=label,
-            alpha=alpha,
-        )
+        # Plot trajectory path (skip if scatter-only like GPS)
+        if not scatter:
+            ax.plot(
+                pose_table["x"],
+                pose_table["y"],
+                "-",
+                color=color,
+                linewidth=2,
+                label=label,
+                alpha=alpha,
+                zorder=zorder,
+            )
 
         # Plot arrows showing heading at intervals
         # Show arrows every N points to avoid clutter
@@ -259,9 +508,12 @@ class Visualizer:
                 pose_table["x"],
                 pose_table["y"],
                 marker="*",
+                s=30,
                 color=color,
-                linewidth=2,
+                linewidth=1.5,
                 alpha=alpha,
+                label=label,
+                zorder=zorder,
             )
 
         # Mark start and end positions
@@ -285,10 +537,10 @@ class Visualizer:
             alpha=alpha,
         )
 
-        ax.legend(loc="upper right")
         return ax
 
-    def draw_all(self):
+    def draw_all(self, animate=False, fps=30, speedup=3.0, linger_seconds=2.0, 
+                 output_png="dataset_viz.png", output_gif="trajectory_animation.gif"):
         """
         Docstring for draw_all
 
@@ -299,27 +551,78 @@ class Visualizer:
             "Ground Truth",
             self.poses_from_gt(),
             "green",
+            zorder=5,
         )
         self.plot_single_trajectory(
             "Dead Reckoning",
             self.poses_from_odom(),
             "red",
+            zorder=5,
         )
-        self.plot_single_trajectory(
-            "GPS Only",
-            self.poses_from_gps(),
-            "orange",
-            scatter=True,
-        )
-        plt.savefig(self.output_path / "dataset_viz.png")
-        print("Finished plotting at path: ")
-        print(self.output_path / "dataset_viz.png")
+        
+        gps_poses = self.poses_from_gps()
+        if not gps_poses.empty:
+            self.plot_single_trajectory(
+                "GPS Measurements",
+                gps_poses,
+                "orange",
+                scatter=True,
+                zorder=0,
+            )
+        
+        kf_poses = self.poses_from_kf()
+        if not kf_poses.empty:
+            self.plot_single_trajectory(
+                self.filter_label,
+                kf_poses,
+                "blue",
+                zorder=5,
+            )
+            # Draw uncertainty ellipses on the current axes
+            self.plot_uncertainty_ellipses(plt.gca(), color="blue", alpha=0.1)
+        
+        ax = plt.gca()
+        if self.params:
+            param_lines = []
+            if 'Q_stdev' in self.params:
+                param_lines.append(f"Q (σ): {self.params['Q_stdev']:.4f}")
+            if 'R_gps' in self.params:
+                R_val = self.params['R_gps']
+                param_lines.append(f"R X: {R_val[0,0]:.2f}")
+                param_lines.append(f"R Y: {R_val[1,1]:.2f}")
+            if 'gps_x_noise' in self.params and 'gps_y_noise' in self.params:
+                param_lines.append(f"GPS X_NOISE: {self.params['gps_x_noise']:.2f}m")
+                param_lines.append(f"GPS Y_NOISE: {self.params['gps_y_noise']:.2f}m")
+            if 'pinger_range_noise' in self.params:
+                param_lines.append(f"RANGE_NOISE: {self.params['pinger_range_noise']:.2f}m")
+            if 'pinger_bearing_noise' in self.params:
+                bearing_deg = np.degrees(self.params['pinger_bearing_noise'])
+                param_lines.append(f"BEARING_NOISE: {bearing_deg:.1f}°")
+            
+            if param_lines:
+                param_text = '\n'.join(param_lines)
+                legend = ax.legend(loc="upper left", title=param_text, 
+                                 frameon=True, fancybox=False, shadow=False,
+                                 framealpha=1.0, edgecolor='black')
+                legend.get_title().set_fontsize(9)
+                legend.get_title().set_ha('left')
+        else:
+            ax.legend(loc="upper left")
+        
+        plt.savefig(self.output_path / output_png)
+        print(f"Static plot saved: {self.output_path / output_png}")
+        
+        if animate:
+            print("Generating animation...")
+            self.animate_trajectories(fps=fps, speedup=speedup, linger_seconds=linger_seconds, 
+                                    output_gif=output_gif)
 
     def animate_trajectories(
         self,
         fps=30,
         speedup=3.0,
         linger_seconds=5.0,
+        output_gif="trajectory_animation.gif",
     ):
         """
         Create an animated GIF showing trajectories being drawn over time.
@@ -334,6 +637,7 @@ class Visualizer:
         gt_poses = self.poses_from_gt()
         odom_poses = self.poses_from_odom()
         gps_poses = self.poses_from_gps()
+        kf_poses = self.poses_from_kf()
 
         # Find the maximum number of frames needed
         max_frames = max(len(gt_poses), len(odom_poses))
@@ -351,27 +655,33 @@ class Visualizer:
 
         # Initialize line objects for each trajectory
         (gt_line,) = ax.plot(
-            [], [], "-", color="green", linewidth=2, label="Ground Truth", alpha=0.8
+            [], [], "-", color="green", linewidth=2, label="Ground Truth", alpha=0.8, zorder=5
         )
         (odom_line,) = ax.plot(
-            [], [], "-", color="red", linewidth=2, label="Dead Reckoning", alpha=0.8
+            [], [], "-", color="red", linewidth=2, label="Dead Reckoning", alpha=0.8, zorder=5
         )
-        (gps_line,) = ax.plot([], [], "-", color="orange", linewidth=2, alpha=0.8)
         gps_scatter = ax.scatter(
             [],
             [],
             c="orange",
-            s=50,
+            s=30,
             marker="x",
             label="GPS Measurements",
-            alpha=0.6,
-            zorder=5,
+            alpha=0.8,
+            zorder=0,
+        )
+        (kf_line,) = ax.plot(
+            [], [], "-", color="blue", linewidth=2, label=self.filter_label, alpha=0.8, zorder=5
         )
 
         # Initialize end marker objects (hidden initially)
         gt_end = ax.plot([], [], "s", color="green", markersize=10, alpha=0)[0]
         odom_end = ax.plot([], [], "s", color="red", markersize=10, alpha=0)[0]
         gps_end = ax.plot([], [], "s", color="orange", markersize=10, alpha=0)[0]
+        kf_end = ax.plot([], [], "s", color="blue", markersize=10, alpha=0)[0]
+
+        # List to track uncertainty ellipse patches for animation
+        kf_ellipses = []
 
         # Add time display
         time_text = ax.text(
@@ -390,19 +700,21 @@ class Visualizer:
             """Initialize animation"""
             gt_line.set_data([], [])
             odom_line.set_data([], [])
-            gps_line.set_data([], [])
             gps_scatter.set_offsets(np.empty((0, 2)))
+            kf_line.set_data([], [])
             gt_end.set_data([], [])
             odom_end.set_data([], [])
             gps_end.set_data([], [])
+            kf_end.set_data([], [])
             time_text.set_text("")
             return (
                 gt_line,
                 odom_line,
-                gps_line,
                 gps_scatter,
+                kf_line,
                 gt_end,
                 odom_end,
+                kf_end,
                 time_text,
             )
 
@@ -441,14 +753,45 @@ class Visualizer:
 
             # Update GPS measurements synchronized by time
             # Find GPS measurements up to the current time
-            if actual_frame < len(gt_poses):
+            if actual_frame < len(gt_poses) and not gps_poses.empty:
                 current_time = gt_poses.iloc[actual_frame]["Time"]
                 gps_up_to_now = gps_poses[gps_poses["Time"] <= current_time]
                 if len(gps_up_to_now) > 0:
-                    gps_line.set_data(gps_up_to_now["x"], gps_up_to_now["y"])
                     gps_scatter.set_offsets(gps_up_to_now[["x", "y"]].values)
 
-            return gt_line, odom_line, gps_scatter, gt_end, odom_end, time_text
+            # Update Kalman Filter trajectory. Claude Opus 4.6 helped me write this if statement.
+            if not kf_poses.empty and actual_frame < len(kf_poses):
+                kf_data = kf_poses.iloc[: actual_frame + 1]
+                kf_line.set_data(kf_data["x"], kf_data["y"])
+
+                # Draw uncertainty ellipse at current position (remove previous)
+                from matplotlib.patches import Ellipse
+                for e in kf_ellipses:
+                    e.remove()
+                kf_ellipses.clear()
+
+                if self.kf_log is not None and actual_frame < len(self.kf_log):
+                    row = self.kf_log.iloc[actual_frame]
+                    P_xx, P_yy, P_xy = row["P_xx"], row["P_yy"], row["P_xy"]
+                    cov = np.array([[P_xx, P_xy], [P_xy, P_yy]])
+                    eigenvalues, eigenvectors = np.linalg.eigh(cov)
+                    eigenvalues = np.maximum(eigenvalues, 1e-10)
+                    scale = 2.0 * np.sqrt(eigenvalues) * 2.4477
+                    angle = np.degrees(np.arctan2(eigenvectors[1, 0], eigenvectors[0, 0]))
+                    ellipse = Ellipse(
+                        xy=(row["x"], row["y"]),
+                        width=scale[0], height=scale[1], angle=angle,
+                        facecolor="blue", edgecolor="blue", alpha=0.15, linewidth=1,
+                    )
+                    ax.add_patch(ellipse)
+                    kf_ellipses.append(ellipse)
+
+                # Show end marker on final frames
+                if is_final_frame:
+                    kf_end.set_data([kf_data.iloc[-1]["x"]], [kf_data.iloc[-1]["y"]])
+                    kf_end.set_alpha(0.8)
+
+            return gt_line, odom_line, gps_scatter, kf_line, gt_end, odom_end, kf_end, time_text
 
         # Create animation
         anim = FuncAnimation(
@@ -457,14 +800,13 @@ class Visualizer:
             init_func=init,
             frames=len(frame_indices),
             interval=1000 / fps,  # milliseconds between frames
-            blit=True,
+            blit=False,
             repeat=True,
         )
 
         # Save as GIF
         writer = PillowWriter(fps=fps)
-        anim.save(self.output_path / "trajectory_animation.gif", writer=writer)
+        anim.save(self.output_path / output_gif, writer=writer)
         plt.close(fig)
-        print("Finished animating at path: ")
-        print(self.output_path / "trajectory_animation.gif")
+        print(f"Animation saved: {self.output_path / output_gif}")
         return anim
