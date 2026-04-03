@@ -210,12 +210,12 @@ def run_simulation(filter_type, input_filepath, drive_mode, ekf_use_gps=True, ek
 
 if __name__ == "__main__":
     # VISUALIZATION
-    GENERATE_LKF_VIZ = True   # Set to True to generate LKF visualizations
-    GENERATE_EKF_VIZ = False   # Set to True to generate EKF visualizations
+    GENERATE_LKF_VIZ = False   # Set to True to generate LKF visualizations
+    GENERATE_EKF_VIZ = True   # Set to True to generate EKF visualizations
     GENERATE_ANIMATION = False # Set to True to generate animated GIFs
     
     #EKF SENSOR SELECTION
-    EKF_USE_GPS = False              # Set to True to use GPS measurements with EKF
+    EKF_USE_GPS = False              # Set to True to use GPS measurements with LKF
     EKF_USE_LANDMARK_PINGER = True  # Set to True to use LandmarkPinger measurements with EKF
     
     from viz import Visualizer

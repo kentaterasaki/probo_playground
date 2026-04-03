@@ -6,9 +6,61 @@ The Environment class models the world that the robots navigate in. The world is
 Critically, the environment tracks the robot's state. In this case, the robot's state is a vector that includes three state variables: x position, y position, and heading.
 """
 
-from utils import Position, Pose, Bounds, Landmark, BearingRange
+from utils import Position, Pose, BearingRange, Bounds, Landmark
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import RBF, ConstantKernel
+from itertools import product
 import pandas as pd
+import numpy as np
 import math
+
+
+class Field:
+    """Creates a continuous function that can be sampled.
+    
+    Attributes:
+        DIMS (Bounds): the four corners of the environment
+        variance (float): the variance of the GP kernel
+        lengthscale (float): the lengthscale of the GP kernel
+        random_seed (int): random seed for setting world draw
+    """
+    def __init__(
+        self,
+        dimensions: Bounds,
+        variance: float = 0.1,
+        lengthscale: float = 1.0,
+        random_seed: int = 10,
+    ):
+        """
+        Initialize the continuous field in an environment.
+
+        Args:
+            dimensions (Bounds): the four corners of the environment
+            variance (float): the variance of the GP kernel
+            lengthscale (float): the lengthscale of the GP kernel
+            random_seed (int): random seed for setting consistent world draw
+        """
+        self.DIMS = dimensions
+        self.variance = variance
+        self.lengthscale = lengthscale
+        self.random_seed = random_seed
+        self._initialize_field()
+
+    def _initialize_field(self):
+        """Initializes the continuous field in an environment."""
+        self.kernel = ConstantKernel(1.0, (1e-3, 1e-3)) * RBF([self.lengthscale, self.lengthscale], (self.variance, 100*self.variance))
+        field = GaussianProcessRegressor(kernel=self.kernel, n_restarts_optimizer=15, random_state=self.random_seed)
+        x, y = np.linspace(self.DIMS.x_min, self.DIMS.x_max, 20), np.linspace(self.DIMS.y_min, self.DIMS.y_max, 20)
+        M = np.array(list(product(x, y)))
+        init_sample = field.sample_y(M, 1, random_state=self.random_seed)
+        field.fit(M, init_sample)
+        self.field = field
+
+    def info(self) -> dict:
+        return {"Variance": self.variance,
+                "Lengthscale": self.lengthscale,
+                "Random Seed": self.random_seed,
+                "Model": self.field}
 
 
 class Environment:
@@ -26,36 +78,38 @@ class Environment:
     def __init__(
         self,
         dimensions: Bounds,
-        dt: float,
-        obstacles: list[Bounds],
-        landmarks: list[Landmark],
-        robot_starting_pose: Pose,
+        dt: float = None,
+        obstacles: list[Bounds] = None,
+        landmarks: list[Landmark] = None,
+        robot_starting_pose: Pose = None,
+        field: Field = None,
+        timestep: float = 0.1,
+        lm_range: float = 10.0,
     ):
         """
         Initialize an instance of the Environment class.
 
         Args:
-            dimensions: the horizontal and vertical size of the world
-            dt: the length of each timestep, in seconds
-            obstacles: a list of obstacles
-            landmarks: a list of landmarks
-            robot_starting_pose: the initial position and heading of the robot
+            dimensions (Bounds): the four corners of the environment
+            dt (float): timestep size (used by main.py positional call)
+            obstacles (list[Bounds]): a list of all intraversible areas
+            landmarks (list[Landmark]): a list of all identifiable landmarks
+            robot_starting_pose (Pose): the initial position and heading of the robot
+            field (Field): continuous field for informative sampling
+            timestep (float): timestep size (used by simulator.py keyword call)
+            lm_range (float): detectable range of landmarks
         """
         # TODO: set the dimensions property to the parameter value
         self.DIMENSIONS = dimensions
-
-        # TODO: set the timestep size property to the parameter value
-        self.DT = dt
-
-        # TODO: set the current time to zero
+        self.DT = dt if dt is not None else timestep
         self.time = 0
+        self.OBSTACLES = obstacles if obstacles is not None else []
+        self.LANDMARKS = landmarks if landmarks is not None else []
+        self.robot_pose = robot_starting_pose if robot_starting_pose is not None else Pose(Position(0, 0), 0)
+        self.lm_range = lm_range
+        self.continuous_field = field
 
-        # TODO: set the obstacles and landmarks properties to the parameter lists
-        self.OBSTACLES = obstacles
-        self.LANDMARKS = landmarks
-
-        # TODO: set the robot pose property to the parameter value
-        self.robot_pose = robot_starting_pose
+    # --- Motion Execution ---
 
     def robot_step(self, dx: float, dy: float, dtheta: float):
         """
@@ -72,10 +126,11 @@ class Environment:
         # TODO: fill in the function
         new_pos = self.is_valid_motion(dx, dy)
 
-        new_theta = self.robot_pose.theta + dtheta
+        updated_theta = self.robot_pose.theta + dtheta
+        updated_theta = (updated_theta + math.pi) % (2 * math.pi) - math.pi
 
         self.time = round(self.time + self.DT, 3)
-        self.robot_pose = Pose(new_pos, new_theta)
+        self.robot_pose = Pose(new_pos, updated_theta)
 
 
     def is_valid_motion(self, dx: float, dy: float):
@@ -92,9 +147,11 @@ class Environment:
         """
         # TODO: fill in the function
         x_new = self.robot_pose.pos.x
-        y_new = self.robot_pose.pos.y
-        if self.is_valid_position(Position(x_new + dx, y_new + dy)):
+        if self.is_valid_position(Position(self.robot_pose.pos.x + dx, self.robot_pose.pos.y)):
             x_new = self.robot_pose.pos.x + dx
+
+        y_new = self.robot_pose.pos.y
+        if self.is_valid_position(Position(x_new, self.robot_pose.pos.y + dy)):
             y_new = self.robot_pose.pos.y + dy
 
         return Position(x_new, y_new)
@@ -120,6 +177,8 @@ class Environment:
         
         return True
 
+    # --- Ground Truth Sensing ---
+
     def get_robot_pose(self) -> Pose:
         """
         Return the true robot pose.
@@ -127,6 +186,25 @@ class Environment:
         # TODO: fill in the function
         return self.robot_pose
 
+
+    def get_landmark_by_id(self, id: int):
+        """
+        Retrieve a landmark object using its id number.
+        """
+        for l in self.LANDMARKS:
+            if l.id == id:
+                return l
+        return None
+
+    def get_landmarks_by_pos(self, pos: Position):
+        """
+        Retrieve any landmarks at a given position.
+        """
+        lms = []
+        for l in self.LANDMARKS:
+            if l.pos == pos:
+                lms.append(l)
+        return lms
 
     def get_proximity_to_landmarks(self) -> pd.DataFrame:
         """
@@ -143,6 +221,17 @@ class Environment:
             measurements[f"Landmark{i.id}"] = [BearingRange(i.id, bearing, range)]
         return measurements
 
+    def get_gt_field_value(self) -> float:
+        """
+        Returns the ground truth field measurement of the robot at the current ground truth pose.
+        """
+        # if no field, return 0
+        if self.continuous_field is None:
+            return 0.0
+        # predict the field value at the robot's coordinates using the field model for ground truth 
+        return self.continuous_field.field.predict(np.asarray((self.robot_pose.pos.x, self.robot_pose.pos.y)).reshape(1,-1))
+
+    # --- Logging ---
 
     def take_state_snapshot(self):
         """
@@ -157,6 +246,21 @@ class Environment:
         prox_to_landmarks = self.get_proximity_to_landmarks()
 
         return pd.concat([df0, prox_to_landmarks], axis=1)
+
+    def info(self) -> dict:
+        """
+        Return a dictionary of frozen environment information.
+        """
+        result = {
+            "Dimensions": self.DIMENSIONS.to_dict(),
+            "Obstacles": [obs.to_dict() for obs in self.OBSTACLES],
+            "Landmarks": [l.to_dict() for l in self.LANDMARKS],
+            "Timestep": self.DT,
+            "Pinger Range": self.lm_range,
+        }
+        if self.continuous_field is not None:
+            result["Field"] = self.continuous_field.info()
+        return result
 
     def get_environment_info(self):
         """

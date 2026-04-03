@@ -6,6 +6,9 @@ import pandas as pd
 import numpy as np
 from matplotlib.animation import FuncAnimation, PillowWriter
 from pathlib import Path
+from utils import Pose, Landmark
+from itertools import product
+import copy
 import ast
 
 
@@ -90,29 +93,57 @@ class Visualizer:
                  params: dict = None):
         """
         Initialize the visualizer class.
+        Supports two data formats:
+          - CSV files (from main.py / KF workflow)
+          - Pickle files (from simulator.py / informative sampling workflow)
         """
         self.output_path = output_path
         self.filter_type = filter_type
         self.show_landmarks = show_landmarks
         self.params = params or {}
-        
-        gt_csv_path = output_path / "ground_truth_history.csv"
-        sensor_csv_path = output_path / "sensor_data_history.csv"
-        env_config_path = output_path / "environment_config.csv"
-        
-        if filter_type == "kalman":
-            kf_csv_path = output_path / "kalman_filter_history.csv"
+        self.kf_log = None
+        self.env_info = None
+        self.sensor_info = None
+
+        gt_pkl_path = output_path / "groundtruth_log.pkl"
+        if gt_pkl_path.exists():
+            self._load_from_pickle()
+        else:
+            self._load_from_csv()
+
+    def _load_from_pickle(self):
+        """Load data from pickle files (simulator.py workflow)."""
+        import pickle
+        with open(self.output_path / "groundtruth_log.pkl", "rb") as f:
+            self.gt_log = pickle.load(f)
+        with open(self.output_path / "sensor_log.pkl", "rb") as f:
+            self.sensor_log = pickle.load(f)
+        with open(self.output_path / "env_info.pkl", "rb") as f:
+            self.env_info = pickle.load(f)
+        with open(self.output_path / "sensor_info.pkl", "rb") as f:
+            self.sensor_info = pickle.load(f)
+
+    def _load_from_csv(self):
+        """Load data from CSV files (main.py / KF workflow)."""
+        gt_csv_path = self.output_path / "ground_truth_history.csv"
+        sensor_csv_path = self.output_path / "sensor_data_history.csv"
+        env_config_path = self.output_path / "environment_config.csv"
+
+        if self.filter_type == "kalman":
+            kf_csv_path = self.output_path / "kalman_filter_history.csv"
             self.filter_label = "Linear Kalman Filter"
-        elif filter_type == "extended_kalman":
-            kf_csv_path = output_path / "extended_kalman_filter_history.csv"
-            self.filter_label = "Extended Kalman Filter"     
+        elif self.filter_type == "extended_kalman":
+            kf_csv_path = self.output_path / "extended_kalman_filter_history.csv"
+            self.filter_label = "Extended Kalman Filter"
+        else:
+            kf_csv_path = None
+
         self.gt_log = pd.read_csv(gt_csv_path)
         self.sensor_log = pd.read_csv(sensor_csv_path)
-        
-        self.kf_log = None
-        if kf_csv_path.exists():
+
+        if kf_csv_path and kf_csv_path.exists():
             self.kf_log = pd.read_csv(kf_csv_path)
-        
+
         self._parse_csv_data()
         self._load_env_config_from_csv(env_config_path)
  
@@ -191,6 +222,153 @@ class Visualizer:
         ax.set_ylim(dims["y_min"] - 1, dims["y_max"] + 1)
         ax.set_aspect("equal")
         ax.grid(True, alpha=0.3)
+
+        # # Plot ground truth field and field measuremnts
+        # belief_info = self.sensor_info.loc[self.sensor_info["Sensor Name"] == "belief"]
+        # obs_model = belief_info["Model"][0]
+        # measurements = obs_model.y_train_
+        # measurement_positions = obs_model.X_train_
+
+        # x = np.linspace(dims["x_min"], dims["x_max"], 10)
+        # y = np.linspace(dims["y_min"], dims["y_max"], 10)
+        # X, Y = np.meshgrid(x, y)
+        # M = np.array(list(product(x,y)))
+        
+        # model = self.env_info["Field"]["Model"]
+        # c_sample = model.sample_y(M, 1, random_state=self.env_info["Field"]["Random Seed"])
+        # ax.contourf(X, Y, c_sample.reshape(10,10).T, 10,
+        #             vmin=np.nanmin(measurements), vmax=np.nanmax(measurements))
+
+        # ax.scatter(measurement_positions[:,0], measurement_positions[:,1], c=measurements, cmap="viridis",
+        #            s=200, lw=1.5, edgecolors='k', vmin=np.nanmin(measurements), vmax=np.nanmax(measurements))
+
+
+        # set up env boundaries
+        width = dims["x_max"] - dims["x_min"]
+        height = dims["y_max"] - dims["y_min"]
+        walls = patches.Rectangle(
+            (dims["x_min"], dims["y_min"]),
+            width,
+            height,
+            linewidth=5,
+            edgecolor="black",
+            facecolor="none",
+            alpha=1.0,
+        )
+        ax.add_patch(walls)
+
+        # Plot obstacles
+        for obs in self.env_info["Obstacles"]:
+            width = obs["x_max"] - obs["x_min"]
+            height = obs["y_max"] - obs["y_min"]
+            rect = patches.Rectangle(
+                (obs["x_min"], obs["y_min"]),
+                width,
+                height,
+                linewidth=2,
+                edgecolor="black",
+                facecolor="gray",
+                alpha=0.5,
+                label="Obstacle" if obs == self.env_info["Obstacles"][0] else "",
+            )
+            ax.add_patch(rect)
+
+        # Plot landmarks
+        if self.show_landmarks:
+            for lm in self.env_info["Landmarks"]:
+                # Plot pinging range circle
+                circle = patches.Circle(
+                    (lm["pos"]["x"], lm["pos"]["y"]),
+                    self.env_info["Pinger Range"],
+                    linewidth=1,
+                    edgecolor="red",
+                    facecolor="red",
+                    alpha=0.1,
+                    label="Pinging Range" if lm == self.env_info["Landmarks"][0] else "",
+                )
+                ax.add_patch(circle)
+
+                # plot floating point landmarks
+                ax.plot(
+                    lm["pos"]["x"],
+                    lm["pos"]["y"],
+                    "r*",
+                    markersize=15,
+                    label="Landmark" if lm == self.env_info["Landmarks"][0] else "",
+                )
+                ax.annotate(
+                    f"LM{lm['id']}",
+                    (lm["pos"]["x"], lm["pos"]["y"]),
+                    xytext=(5, 5),
+                    textcoords="offset points",
+                    fontsize=10,
+                    color="red",
+                )
+
+        # Add parameter info to legend if provided
+        if self.params:
+            param_lines = []
+            if 'Q' in self.params:
+                Q_val = self.params['Q']
+                if isinstance(Q_val, np.ndarray):
+                    if Q_val.ndim == 2:
+                        Q_display = np.mean(np.diag(Q_val))
+                    else:
+                        Q_display = Q_val.flat[0]
+                else:
+                    Q_display = Q_val
+                param_lines.append(f"Q (process): {Q_display:.4f}")
+            if 'R' in self.params:
+                R_val = self.params['R']
+                param_lines.append(f"R (meas): [{R_val[0,0]:.2f}, {R_val[1,1]:.2f}]")
+            if 'gps_noise' in self.params:
+                param_lines.append(f"GPS σ: {self.params['gps_noise']:.2f}m")
+            if 'pinger_range_noise' in self.params:
+                param_lines.append(f"Pinger range σ: {self.params['pinger_range_noise']:.2f}m")
+            if 'pinger_bearing_noise' in self.params:
+                bearing_deg = np.degrees(self.params['pinger_bearing_noise'])
+                param_lines.append(f"Pinger bearing σ: {bearing_deg:.1f}°")
+            
+        return fig, ax
+
+    def plot_belief_env(self):
+        """
+        Plot the environment features with no trajectories from belief.
+        """
+        # set up axis
+        fig, ax = plt.subplots(figsize=(10, 10))
+        ax.set_xlabel("X Position (m)")
+        ax.set_ylabel("Y Position (m)")
+        ax.set_title(f"Belief Map")
+
+        # Set up the plot boundaries
+        dims = self.env_info["Dimensions"]
+        ax.set_xlim(dims["x_min"] - 1, dims["x_max"] + 1)
+        ax.set_ylim(dims["y_min"] - 1, dims["y_max"] + 1)
+        ax.set_aspect("equal")
+        ax.grid(True, alpha=0.3)
+
+        # Plot belief truth field
+        belief_info = self.sensor_info.loc[self.sensor_info["Sensor Name"] == "belief"]
+        obs_model = belief_info["Model"][0]
+        measurements = obs_model.y_train_
+        measurement_positions = obs_model.X_train_
+
+        x = np.linspace(dims["x_min"], dims["x_max"], 10)
+        y = np.linspace(dims["y_min"], dims["y_max"], 10)
+        X, Y = np.meshgrid(x, y)
+        M = np.array(list(product(x,y)))
+        
+        c_sample, std_dev = obs_model.predict(M, return_std=True)
+        ax.contourf(X, Y, c_sample.reshape(10,10).T, 10,
+                    vmin=np.nanmin(measurements), vmax=np.nanmax(measurements))
+        ax.scatter(measurement_positions[:,0], measurement_positions[:,1], c=measurements, cmap="viridis",
+                   s=200, lw=1.5, edgecolors='k', vmin=np.nanmin(measurements), vmax=np.nanmax(measurements))
+        
+        ax_inset = ax.inset_axes([0.8, 0.05, 0.3, 0.3])
+        ax_inset.contourf(X, Y, std_dev.reshape(10,10).T, 10)
+        ax_inset.scatter(measurement_positions[:,0], measurement_positions[:,1], s=1, lw=1.5, edgecolors='k')
+        ax_inset.set_title("Belief Uncertainty")
 
         # set up env boundaries
         width = dims["x_max"] - dims["x_min"]
@@ -282,108 +460,129 @@ class Visualizer:
 
     def poses_from_odom(self):
         """
-        Given a DataFrame of odometry data with the following columns:
-        Time | Odometry_LinearVelocity | Odometry_AngularVelocity
-        Output a DataFrame of estimated pose data with the following columns:
-        Time | x | y | theta
+        Reconstruct trajectory from odometry sensor data.
+        Supports both pickle (Pose objects) and CSV (parsed strings) formats.
         """
-        first_pose = self.gt_log['robot_pose_parsed'].iloc[0]
-        x = first_pose['pos']['x']
-        y = first_pose['pos']['y']
-        theta = first_pose['theta']
-        
+        if self.sensor_info is not None:
+            first_pose = self.gt_log['robot_pose'].iloc[0]
+            if isinstance(first_pose, dict):
+                x = first_pose['pos']['x']
+                y = first_pose['pos']['y']
+                theta = first_pose['theta']
+            else:
+                x = first_pose.pos.x
+                y = first_pose.pos.y
+                theta = first_pose.theta
+            dt = self.env_info["Timestep"]
+            time_col = "time"
+        else:
+            first_pose = self.gt_log['robot_pose_parsed'].iloc[0]
+            x = first_pose['pos']['x']
+            y = first_pose['pos']['y']
+            theta = first_pose['theta']
+            dt = self.env_info["Timestep"] if self.env_info else 0.1
+            time_col = "time"
+
         poses = []
-        dt = self.env_info["Timestep"]
         NEAR_ZERO = 1e-6
 
-        # Detect drive mode from available columns in the sensor data
         is_translational = 'encoder_x_vel' in self.sensor_log.columns
+        has_odom = 'Odometry_LinearVelocity' in self.sensor_log.columns
 
         for idx, row in self.sensor_log.iterrows():
-            w = row['encoder_ang_vel']
-            time = row['time']
-
             if is_translational:
-                # Translational (swerve) drive: x and y velocities are independent
+                w = row['encoder_ang_vel']
                 vx = row['encoder_x_vel']
                 vy = row['encoder_y_vel']
                 dx = vx * dt
                 dy = vy * dt
                 dtheta = w * dt
-            else:
-                # Differential drive: linear + angular velocities
-                v = row['encoder_lin_vel']
-
+            elif has_odom:
+                v = row.get('Odometry_LinearVelocity', 0)
+                w = row.get('Odometry_AngularVelocity', 0)
+                if pd.isna(v) or pd.isna(w):
+                    poses.append({"Time": row[time_col], "x": x, "y": y, "theta": theta})
+                    continue
                 if abs(w) < NEAR_ZERO:
-                    # Straight line motion
                     dx = v * dt * np.cos(theta)
                     dy = v * dt * np.sin(theta)
                     dtheta = 0.0
                 else:
-                    # Arc motion (proper differential drive)
-                    r = v / w  # turning radius
+                    r = v / w
                     dtheta = w * dt
                     dx = r * (np.sin(theta + dtheta) - np.sin(theta))
                     dy = -r * (np.cos(theta + dtheta) - np.cos(theta))
-            
-            # Update pose
+            elif 'encoder_lin_vel' in self.sensor_log.columns:
+                v = row['encoder_lin_vel']
+                w = row['encoder_ang_vel']
+                if abs(w) < NEAR_ZERO:
+                    dx = v * dt * np.cos(theta)
+                    dy = v * dt * np.sin(theta)
+                    dtheta = 0.0
+                else:
+                    r = v / w
+                    dtheta = w * dt
+                    dx = r * (np.sin(theta + dtheta) - np.sin(theta))
+                    dy = -r * (np.cos(theta + dtheta) - np.cos(theta))
+            else:
+                dx, dy, dtheta = 0, 0, 0
+
             x += dx
             y += dy
             theta += dtheta
-
-            # Wrap theta to [-pi, pi]
             theta = theta % (2 * np.pi)
             if theta > np.pi:
                 theta -= 2 * np.pi
 
-            poses.append({"Time": time, "x": x, "y": y, "theta": theta})
+            poses.append({"Time": row[time_col], "x": x, "y": y, "theta": theta})
 
         return pd.DataFrame(poses)
 
     def poses_from_gt(self):
         """
-        Given a DataFrame of ground truth data with the following columns:
-        Time | RobotPose
-        Where RobotPose data is in the form: X{xposition}Y{yposition}T{heading}
-        And time data is in decaseconds.
-        Output a DataFrame of ground truth pose data with the following columns:
-        Time | x | y | theta
-        Where time data is in seconds.
+        Extract ground truth poses from the GT log.
+        Supports both pickle and CSV formats.
         """
         poses = []
-        
-        for idx, row in self.gt_log.iterrows():
-            pose_dict = row['robot_pose_parsed']
-            if pose_dict:
-                poses.append({
-                    "Time": row['time'],
-                    "x": pose_dict['pos']['x'],
-                    "y": pose_dict['pos']['y'],
-                    "theta": pose_dict['theta']
-                })
+
+        if self.sensor_info is not None:
+            for idx, row in self.gt_log.iterrows():
+                pose = row['robot_pose']
+                if isinstance(pose, dict):
+                    poses.append({"Time": row['time'], "x": pose['pos']['x'], "y": pose['pos']['y'], "theta": pose['theta']})
+                else:
+                    poses.append({"Time": row['time'], "x": pose.pos.x, "y": pose.pos.y, "theta": pose.theta})
+        else:
+            for idx, row in self.gt_log.iterrows():
+                pose_dict = row['robot_pose_parsed']
+                if pose_dict:
+                    poses.append({
+                        "Time": row['time'],
+                        "x": pose_dict['pos']['x'],
+                        "y": pose_dict['pos']['y'],
+                        "theta": pose_dict['theta']
+                    })
 
         return pd.DataFrame(poses)
 
     def poses_from_gps(self):
         """
-        Given a DataFrame of GPS data with the following columns:
-        Time | GPS
-        Where GPS data is a Position dataclass with fields x and y.
-        Output a DataFrame of GPS pose data with the following columns:
-        Time | x | y | theta
-        Note: theta is set to NaN since GPS doesn't measure heading.
+        Extract GPS position measurements from sensor log.
+        Supports both pickle (Position objects) and CSV (float columns) formats.
         """
         poses = []
-        
-        if 'gps_x' in self.sensor_log.columns and 'gps_y' in self.sensor_log.columns:
+
+        if self.sensor_info is not None and 'GPS' in self.sensor_log.columns:
+            for row in self.sensor_log.itertuples():
+                if hasattr(row, "GPS") and row.GPS is not None:
+                    try:
+                        poses.append({"Time": row.Time, "x": row.GPS.x, "y": row.GPS.y, "theta": np.nan})
+                    except (AttributeError, TypeError):
+                        continue
+        elif 'gps_x' in self.sensor_log.columns and 'gps_y' in self.sensor_log.columns:
             for idx, row in self.sensor_log.iterrows():
                 if pd.notna(row['gps_x']) and pd.notna(row['gps_y']):
-                    poses.append({
-                        "Time": row['time'],
-                        "x": row['gps_x'],
-                        "y": row['gps_y'],
-                        "theta": np.nan,
-                    })
+                    poses.append({"Time": row['time'], "x": row['gps_x'], "y": row['gps_y'], "theta": np.nan})
 
         return pd.DataFrame(poses)
 
@@ -573,7 +772,7 @@ class Visualizer:
         kf_poses = self.poses_from_kf()
         if not kf_poses.empty:
             self.plot_single_trajectory(
-                self.filter_label,
+                getattr(self, 'filter_label', 'Filter Estimate'),
                 kf_poses,
                 "blue",
                 zorder=5,
@@ -616,6 +815,16 @@ class Visualizer:
             print("Generating animation...")
             self.animate_trajectories(fps=fps, speedup=speedup, linger_seconds=linger_seconds, 
                                     output_gif=output_gif)
+
+        if hasattr(self, 'sensor_info') and self.sensor_info is not None:
+            self.plot_belief_env()
+            self.plot_single_trajectory(
+                "Ground Truth",
+                self.poses_from_gt(),
+                "green",
+            )
+            plt.savefig(self.output_path / "dataset_belief_viz.png")
+            print(f"Belief plot saved: {self.output_path / 'dataset_belief_viz.png'}")
 
     def animate_trajectories(
         self,
